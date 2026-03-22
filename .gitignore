@@ -1,0 +1,33 @@
+# Gradle build output
+build/
+.gradle/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Compiled class files
+*.class
+
+# JAR / WAR / EAR
+*.jar
+*.war
+*.ear
+
+# Log files
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+*.env.local
+
+# Spring Boot dev tools restart trigger
+.reloadtrigger
