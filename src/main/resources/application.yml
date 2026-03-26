@@ -28,6 +28,9 @@ spring:
         name: task-management-mcp
         version: 1.0.0
         request-timeout: 30s
+        protocol: STREAMABLE
+        streamable-http:
+          mcp-endpoint: /mcp
 
   jackson:
     serialization:
