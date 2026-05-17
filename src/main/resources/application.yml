@@ -1,5 +1,6 @@
 server:
   port: 8085
+  forward-headers-strategy: NATIVE
 
 spring:
   application:
@@ -35,3 +36,12 @@ spring:
   jackson:
     serialization:
       fail-on-empty-beans: false
+
+  #Oauth 2 Config
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Override via env var when using ngrok:
+          # $env:SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI = "https://<ngrok-kc>.ngrok-free.app/realms/task-management-realm"
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8080/realms/mcp-task-orchestrator-realm}

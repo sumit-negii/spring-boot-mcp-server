@@ -1,14 +1,25 @@
-# Spring Boot MCP Server — Task Management POC
+# MCP Task Orchestrator
+### AI-powered MCP server using Spring Boot, OAuth 2.0, Streamable HTTP, and Claude integration
 
-A proof-of-concept demonstrating how to build a **Model Context Protocol (MCP) server** with Spring Boot and connect it to Claude Desktop or the MCP Inspector.
+A Spring Boot implementation of a **Model Context Protocol (MCP) server** that enables Claude AI to orchestrate tasks, projects, and users through natural language — secured end-to-end with **OAuth 2.0 Authorization Code Flow + PKCE** and integrated with Claude.ai's MCP connector.
+
+---
+
+## Highlights
+
+- **15 MCP tools** across Task, Project, and User domains — callable by Claude AI via natural language
+- **OAuth 2.0 + PKCE** (RFC 7636) secured with Keycloak — no client secret, cryptographic challenge instead
+- **Streamable HTTP transport** (MCP spec 2025-03-26) — single `POST /mcp` endpoint, replaces deprecated HTTP+SSE
+- **Discovery endpoints** (RFC 8414 + RFC 9728) — MCP clients locate the authorization server automatically, zero hardcoded URLs
+- **Spring AI MCP Server** — `@Tool`-annotated methods auto-registered via `ToolCallbackProvider`
+
+> Full authentication setup, Keycloak configuration, tunnel setup, and Claude.ai integration: see [MCP OAuth 2.0 Authentication Guide](MCP_OAUTH_GUIDE.md)
 
 ---
 
 ## What is MCP?
 
-**Model Context Protocol (MCP)** is an open standard by Anthropic that lets AI models (like Claude) communicate with external tools and data sources in a standardized way. Think of it as a universal plugin system for AI.
-
-With MCP, Claude doesn't just generate text — it can take real actions:
+**Model Context Protocol (MCP)** is an open standard by Anthropic that lets AI models like Claude communicate with external tools and data sources in a standardized way — a universal plugin system for AI.
 
 ```
 User: "Show me all critical tasks assigned to Bob"
@@ -22,60 +33,40 @@ Claude formats and presents the answer
 
 ---
 
-## MCP Transport: What It Is and Which to Use
+## MCP Transport
 
-A **transport** is simply how the MCP client (Claude) and the MCP server talk to each other. There are three options:
+A **transport** defines how the MCP client (Claude) and MCP server communicate. This project uses **Streamable HTTP** — the current MCP standard (March 2025).
 
-### STDIO
-The client launches the server as a subprocess and communicates via standard input/output pipes.
-- **Good for:** local desktop tools, IDE plugins
-- **Not good for:** deployed/shared servers, Docker, remote access
-
-### HTTP + SSE *(deprecated)*
-Uses two HTTP endpoints — one for streaming events (`GET /sse`) and one for sending commands (`POST /message`). Requires a bridge tool (`mcp-remote`) between Claude Desktop and the server.
-- **Introduced:** November 2024
-- **Deprecated:** March 2025 — replaced by Streamable HTTP
-
-### Streamable HTTP *(current standard — what this project uses)*
-A single `POST /mcp` endpoint handles everything. The server replies with plain JSON for simple responses, or streams SSE when needed. No bridge tool required for direct HTTP clients.
-- **Introduced:** March 2025 (MCP spec 2025-03-26)
-- **Benefits:** single endpoint, works with load balancers and proxies, simpler setup
-
-> **This project uses Streamable HTTP.** It is the current MCP standard and the recommended transport for all new servers.
+| Transport | Status | How it works |
+|-----------|--------|--------------|
+| STDIO | Active | Client spawns server as subprocess via stdin/stdout — desktop tools only |
+| HTTP + SSE | Deprecated (March 2025) | Two endpoints + bridge tool (`mcp-remote`) |
+| **Streamable HTTP** | **Current standard** | Single `POST /mcp` — plain JSON or SSE stream, no bridge needed |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────┐
-│           Claude Desktop            │
-│       (AI Model — MCP Client)       │
-└────────────────┬────────────────────┘
-                 │ stdio
-                 ▼
-┌─────────────────────────────────────┐
-│        mcp-remote (npm bridge)      │
-│  Adapts Claude Desktop stdio        │
-│  to Streamable HTTP                 │
-└────────────────┬────────────────────┘
-                 │ HTTP (Streamable HTTP)
-                 ▼
-┌─────────────────────────────────────┐
-│   Spring Boot MCP Server            │
-│   port 8085                         │
-│                                     │
-│   POST /mcp  ← single endpoint      │
-│                                     │
-│   TaskTools  ProjectTools UserTools │
-│        ↓           ↓          ↓     │
-│      Services + Repositories        │
-│              ↓                      │
-│      H2 In-Memory Database          │
-└─────────────────────────────────────┘
+┌─────────────────────────────┐
+│         Claude.ai           │   MCP Client (OAuth Client)
+└──────────────┬──────────────┘
+               │ HTTPS via ngrok tunnel
+               ▼
+┌─────────────────────────────┐
+│   Spring Boot MCP Server    │   Resource Server — validates JWT, exposes tools
+│   POST /mcp                 │
+│   /.well-known/oauth-*      │   OAuth discovery endpoints (RFC 8414, RFC 9728)
+└──────────────┬──────────────┘
+               │ JWT validation (JWKS)
+               ▼
+┌─────────────────────────────┐
+│         Keycloak            │   Authorization Server — issues signed JWTs
+│   (via Cloudflare tunnel)   │
+└─────────────────────────────┘
 ```
 
-> Claude Desktop only speaks stdio natively, so `mcp-remote` acts as a thin bridge. The MCP Inspector connects directly via HTTP — no bridge needed.
+The MCP server never handles login itself — it rejects unauthenticated requests with `401`, exposes discovery endpoints, and validates JWTs on every request.
 
 ---
 
@@ -83,37 +74,28 @@ A single `POST /mcp` endpoint handles everything. The server replies with plain 
 
 ```
 src/main/java/dev/mcp/server/
-├── McpServerApplication.java           Main entry point
+├── McpServerApplication.java
 │
 ├── config/
-│   └── McpToolConfig.java              Registers all tools with MCP framework
+│   ├── McpToolConfig.java          Registers all 15 tools with MCP framework
+│   └── SecurityConfig.java         OAuth 2.0 resource server + discovery endpoints
 │
-├── domain/                             JPA entities
-│   ├── enums/
-│   │   ├── ProjectStatus.java          ACTIVE, ARCHIVED
-│   │   ├── TaskPriority.java           LOW, MEDIUM, HIGH, CRITICAL
-│   │   ├── TaskStatus.java             TODO, IN_PROGRESS, REVIEW, DONE, CANCELLED
-│   │   └── UserRole.java               ADMIN, DEVELOPER, MANAGER
+├── domain/                         JPA entities
+│   ├── enums/                      ProjectStatus, TaskPriority, TaskStatus, UserRole
 │   ├── Project.java
 │   ├── Task.java
 │   └── User.java
 │
-├── repository/                         Spring Data JPA repositories
-│   ├── ProjectRepository.java
-│   ├── TaskRepository.java             
-│   └── UserRepository.java
+├── repository/                     Spring Data JPA repositories
+├── service/                        Business logic
 │
-├── service/                            Business logic
-│   ├── ProjectService.java
-│   └── TaskService.java
-│
-├── tools/                              MCP tool methods (@Tool annotated)
-│   ├── TaskTools.java                  8 tools
-│   ├── ProjectTools.java               5 tools
-│   └── UserTools.java                  2 tools
+├── tools/                          MCP tool methods (@Tool annotated)
+│   ├── TaskTools.java              8 tools
+│   ├── ProjectTools.java           5 tools
+│   └── UserTools.java              2 tools
 │
 └── init/
-    └── DataInitializer.java            Seeds sample data on startup
+    └── DataInitializer.java        Seeds sample data on startup
 ```
 
 ---
@@ -157,102 +139,50 @@ src/main/java/dev/mcp/server/
 ### Prerequisites
 
 - **Java 21+** — [Download here](https://adoptium.net)
-- **Node.js 18+** — [Download here](https://nodejs.org) *(required for mcp-remote and MCP Inspector)*
-- **Claude Desktop** *(optional — only needed to connect to Claude)*
+- **Node.js 18+** — [Download here](https://nodejs.org) *(for MCP Inspector)*
+- **Docker** — *(for Keycloak, if using OAuth)*
 
-> After installing Node.js, verify it works: `node --version` and `npx --version`
-
-### 1. Start the Server
+### Start the Server
 
 ```bash
 ./gradlew bootRun
 ```
 
-The server starts on **port 8085** and seeds sample data automatically:
+Starts on **port 8085** and seeds sample data:
 
 ```
 [DataInitializer] Sample data created: 4 users, 3 projects, 7 tasks
 Tomcat started on port(s): 8085
 ```
 
-Sample data includes:
-- **Users:** Alice (MANAGER), Bob (DEVELOPER), Carol (DEVELOPER), Dave (ADMIN)
-- **Projects:** Mobile App Redesign, API Platform v2, Legacy System Migration
-- **Tasks:** 7 tasks with mixed priorities and statuses
+Sample data: Alice (MANAGER), Bob / Carol (DEVELOPER), Dave (ADMIN) — 3 projects, 7 tasks.
 
 ---
 
-## Connect via MCP Inspector *(easiest way to test)*
+## Quick Test — MCP Inspector (No Auth Required)
 
-The **MCP Inspector** is an official browser-based tool to explore and test any MCP server. No Claude Desktop needed.
-
-### Run the Inspector
+The fastest way to verify the server and call tools locally:
 
 ```bash
 npx @modelcontextprotocol/inspector
 ```
 
-This opens the Inspector UI at **http://localhost:6274**
-
-### Connect to this server
-
-In the Inspector UI:
+Opens at `http://localhost:6274`. Connect with:
 
 | Field | Value |
 |-------|-------|
 | Transport | Streamable HTTP |
 | URL | `http://localhost:8085/mcp` |
 
-Click **Connect** — you will see all 15 tools listed. You can call any tool directly from the UI and see the raw JSON response.
+All 15 tools appear immediately. Call any tool and see the raw JSON response.
+
+> For OAuth-secured testing and Claude.ai integration, see [MCP OAuth 2.0 Authentication Guide](MCP_OAUTH_GUIDE.md).
 
 ---
 
-## Connect via Claude Desktop
+## H2 Console
 
-### Step 1 — Edit the config file
-
-Open the Claude Desktop config file:
-
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-### Step 2 — Add the server entry
-
-```json
-{
-  "mcpServers": {
-    "task-management": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "http://localhost:8085/mcp"
-      ]
-    }
-  }
-}
-```
-
-### Step 3 — Restart Claude Desktop
-
-After restarting, you will see the tool icon (hammer) in the chat interface. The MCP server is connected.
-
-### Try these prompts
-
-```
-"List all projects"
-"Show me all CRITICAL tasks"
-"What tasks is Bob working on?"
-"Create a task called 'Update dependencies' in project 2, assign it to Carol"
-"Mark task 3 as done"
-"Search for tasks related to authentication"
-"Show me the Mobile App Redesign project with all its tasks"
-```
-
----
-
-## Debug via H2 Console
-
-While the server is running, open:
+Inspect the in-memory database while the server is running:
 
 ```
 http://localhost:8085/h2-console
@@ -268,10 +198,10 @@ http://localhost:8085/h2-console
 
 ## How Tools Are Registered
 
-Spring AI scans for `ToolCallbackProvider` beans and exposes them automatically via the MCP transport. The `@Tool` annotation marks a method as an MCP tool.
+Spring AI scans for `ToolCallbackProvider` beans and exposes them via the MCP transport automatically.
 
 ```java
-// McpToolConfig.java — registers all 15 tools in one place
+// McpToolConfig.java
 @Bean
 public ToolCallbackProvider taskManagementToolCallbackProvider(
         TaskTools taskTools, ProjectTools projectTools, UserTools userTools) {
@@ -282,7 +212,7 @@ public ToolCallbackProvider taskManagementToolCallbackProvider(
 ```
 
 ```java
-// Example tool in TaskTools.java
+// Example tool — Spring AI generates JSON Schema from these annotations
 @Tool(name = "list_tasks", description = "List tasks with optional filters.")
 public List<Task> listTasks(
         @ToolParam(description = "Filter by status: TODO, IN_PROGRESS, REVIEW, DONE, CANCELLED", required = false) String status,
@@ -290,8 +220,6 @@ public List<Task> listTasks(
     // ...
 }
 ```
-
-Spring AI generates a JSON Schema from these annotations and sends it to Claude during the MCP handshake, so Claude knows exactly what tools exist and how to call them.
 
 ---
 
@@ -301,6 +229,8 @@ Spring AI generates a JSON Schema from these annotations and sends it to Claude 
 |------------|---------|------|
 | Spring Boot | 3.4.3 | Application framework |
 | Spring AI MCP Server | 1.1.3 | MCP protocol + Streamable HTTP transport |
+| Spring Security OAuth2 | via Boot | JWT validation (resource server) |
+| Keycloak | latest | Authorization server (OAuth 2.0 + PKCE) |
 | Spring Data JPA | via Boot | Database abstraction |
 | H2 Database | via Boot | In-memory database |
 | Lombok | via Boot | Boilerplate reduction |
@@ -311,7 +241,7 @@ Spring AI generates a JSON Schema from these annotations and sends it to Claude 
 
 ## Resources
 
+- [MCP OAuth 2.0 Authentication Guide](MCP_OAUTH_GUIDE.md) — Keycloak setup, tunnel configuration, Claude.ai integration
 - [MCP Specification](https://modelcontextprotocol.io) — Official MCP documentation
 - [Spring AI MCP Docs](https://docs.spring.io/spring-ai/reference/api/mcp/mcp-server-boot-starter-docs.html) — Spring AI MCP server reference
 - [MCP Inspector](https://github.com/modelcontextprotocol/inspector) — Official MCP testing tool
-- [Claude Desktop MCP Guide](https://modelcontextprotocol.io/quickstart/user) — Connecting MCP servers to Claude Desktop
